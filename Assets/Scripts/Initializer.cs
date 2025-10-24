@@ -6,4 +6,9 @@ public class Initializer : MonoBehaviour
     {
         await RPSClient.RPSClient.Instance.LoginAsync();
     }
+
+    public void OnApplicationQuit()
+    {
+        RPSClient.RPSClient.Instance.Cancel();
+    }
 }

@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Net.WebSockets;
 using System.Security.Cryptography;
 using System.Text;
@@ -26,11 +27,11 @@ namespace RPSClient
         private string _token;
 
         private CancellationTokenSource _cts = new();
-
-        private bool _pongReceived = true;
-
-        private const float PingIntervalSeconds = 10f;
-        private const float PongTimeoutSeconds = 10f;
+        
+        private const int PingIntervalSeconds = 10;
+        private const int PongTimeoutSeconds = 10;
+        
+        private TaskCompletionSource<bool> _pongTcs;
 
         public event Action OnConnected;
         public event Action OnDisconnected;
@@ -42,12 +43,21 @@ namespace RPSClient
 
         public async Task LoginAsync()
         {
-            _token = await RequestLoginTokenAsync();
+            _cts = new();
+            _token = string.Empty;
+
+            while (string.IsNullOrEmpty(_token) && !_cts.IsCancellationRequested)
+            {
+                _token = await RequestLoginTokenAsync();
+                await Task.Delay(TimeSpan.FromSeconds(2));
+            }
             await ConnectWebSocketAsync();
         }
 
         private async Task<String> RequestLoginTokenAsync()
         {
+            if (_cts.IsCancellationRequested) return "";
+            
             using (var request = new UnityWebRequest(BASE_URL + "api/auth/login", "POST"))
             {
                 Debug.Log("Started logging in");
@@ -78,7 +88,7 @@ namespace RPSClient
 
         private async Task ConnectWebSocketAsync()
         {
-            _cts = new();
+            if(_cts.IsCancellationRequested) return;
             _webSocket = new ClientWebSocket();
 
             try
@@ -104,20 +114,27 @@ namespace RPSClient
             while (!_cts.Token.IsCancellationRequested &&
                    _webSocket.State == WebSocketState.Open)
             {
-                _pongReceived = false;
+                _pongTcs = new TaskCompletionSource<bool>();
                 await SendMessage(new WebSocketMessage { Type = WebSocketMessageTypes.Ping });
+                Debug.Log("Ping");
 
-                await Task.Delay(TimeSpan.FromSeconds(PongTimeoutSeconds));
+                var pongReceived = await Task.WhenAny(_pongTcs.Task
+                    ,Task.Delay(TimeSpan.FromSeconds(PongTimeoutSeconds))) == _pongTcs.Task;
 
-                if (!_pongReceived)
+                if (!pongReceived)
                 {
-                    Debug.LogWarning("Heartbeat timeout. Reconnecting...");
+                    Debug.LogError("Heartbeat timeout. Reconnecting...");
                     await RetryReconnectAsync();
                     return;
                 }
 
                 await Task.Delay(TimeSpan.FromSeconds(PingIntervalSeconds));
             }
+        }
+        
+        private void OnPongReceived()
+        {
+            _pongTcs?.TrySetResult(true);
         }
 
         private async Task ListenLoopAsync()
@@ -141,7 +158,8 @@ namespace RPSClient
 
                     if (msg.Type == WebSocketMessageTypes.Pong)
                     {
-                        _pongReceived = true;
+                        OnPongReceived();
+                        Debug.Log("Pong");
                         continue;
                     }
 
@@ -178,6 +196,7 @@ namespace RPSClient
 
             await Task.Delay(3000);
 
+            _cts = new();
             Debug.Log("Reconnecting...");
             await ConnectWebSocketAsync();
         }
@@ -204,6 +223,11 @@ namespace RPSClient
                 // Create a GUID from the 16-byte MD5 hash
                 return new Guid(hashBytes);
             }
+        }
+
+        public void Cancel()
+        {
+            _cts.Cancel();
         }
     }
 
