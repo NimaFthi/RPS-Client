@@ -4,6 +4,6 @@ public class Initializer : MonoBehaviour
 {
     public async void Start()
     {
-        await RPSClient.RPSClient.Instance.Login();
+        await RPSClient.RPSClient.Instance.LoginAsync();
     }
 }

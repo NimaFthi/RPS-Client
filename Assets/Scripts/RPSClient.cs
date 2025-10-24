@@ -18,25 +18,39 @@ namespace RPSClient
         {
             get => _instance ??= new RPSClient();
         }
-        
-        private ClientWebSocket _webSocket;
-        
+
         private const string BASE_URL = "http://localhost:5012/";
         private const string BASE_SOCKET_URL = "ws://localhost:5012/";
-        
-        private bool _pongReceived = false;
-        private DateTime _lastPingTime = DateTime.MinValue;
-        private float _pingIntervalInSeconds = 30f;
-        private float _pongTimeoutInSeconds = 10f; 
+
+        private ClientWebSocket _webSocket;
+        private string _token;
+
+        private CancellationTokenSource _cts = new();
+
+        private bool _pongReceived = true;
+
+        private const float PingIntervalSeconds = 10f;
+        private const float PongTimeoutSeconds = 10f;
+
+        public event Action OnConnected;
+        public event Action OnDisconnected;
+        public event Action<WebSocketMessage> OnMessage;
 
         private RPSClient()
         {
-            
         }
-        public async Task Login()
+
+        public async Task LoginAsync()
+        {
+            _token = await RequestLoginTokenAsync();
+            await ConnectWebSocketAsync();
+        }
+
+        private async Task<String> RequestLoginTokenAsync()
         {
             using (var request = new UnityWebRequest(BASE_URL + "api/auth/login", "POST"))
             {
+                Debug.Log("Started logging in");
                 request.SetRequestHeader("Content-Type", "application/json");
 
                 var json = JsonConvert.SerializeObject(new AuthRequestDto
@@ -47,100 +61,135 @@ namespace RPSClient
                 byte[] message = Encoding.UTF8.GetBytes(json);
                 request.uploadHandler = new UploadHandlerRaw(message);
                 request.downloadHandler = new DownloadHandlerBuffer();
-                
+
                 await request.SendWebRequest();
 
                 if (request.result != UnityWebRequest.Result.Success)
                 {
                     Debug.LogError($"Failed to authenticate => {request.error}");
-                    return;
+                    return string.Empty;
                 }
-                
-                var token = request.downloadHandler.text;
-                Debug.Log($"Token => {token}");
 
-                await ConnectWebsocket(token);
+                var token = request.downloadHandler.text;
+                Debug.Log($"Received Token => {token}");
+                return token;
             }
         }
-        
-        private async Task ConnectWebsocket(string token)
+
+        private async Task ConnectWebSocketAsync()
         {
+            _cts = new();
             _webSocket = new ClientWebSocket();
-            
+
             try
             {
-                await _webSocket.ConnectAsync(new Uri(BASE_SOCKET_URL + $"ws?token={token}"), CancellationToken.None);
-                Debug.Log("Websocket is Connected");
-                _ = StartPingLoop();
-                await ListenLoop();
+                Uri uri = new Uri($"{BASE_SOCKET_URL}ws?token={_token}");
+                await _webSocket.ConnectAsync(uri, _cts.Token);
+                Debug.Log("Connected to server.");
+
+                OnConnected?.Invoke();
+
+                _ = Task.Run(PingLoopAsync, _cts.Token);
+                _ = Task.Run(ListenLoopAsync, _cts.Token);
             }
-            catch (Exception e)
+            catch (Exception ex)
             {
-                Debug.LogError($"Error in connecting to socket {e.Message}");
+                Debug.LogError($"WS connect failed: {ex.Message}");
+                await RetryReconnectAsync();
             }
         }
 
-        private async Task StartPingLoop()
+        private async Task PingLoopAsync()
         {
-            while (_webSocket.State == WebSocketState.Open)
+            while (!_cts.Token.IsCancellationRequested &&
+                   _webSocket.State == WebSocketState.Open)
             {
-                if (_lastPingTime + TimeSpan.FromSeconds(_pingIntervalInSeconds) >= DateTime.UtcNow) continue;
-                
-                await SendMessage(new WebSocketMessage()
-                {
-                    Type = WebSocketMessageTypes.Ping
-                });
-                
-                Debug.Log("Ping");
-                
-                _lastPingTime = DateTime.UtcNow;
                 _pongReceived = false;
+                await SendMessage(new WebSocketMessage { Type = WebSocketMessageTypes.Ping });
 
-                await Task.Delay(TimeSpan.FromSeconds(_pongTimeoutInSeconds));
+                await Task.Delay(TimeSpan.FromSeconds(PongTimeoutSeconds));
 
                 if (!_pongReceived)
                 {
-                    Debug.Log("Websocket disconnected");
+                    Debug.LogWarning("Heartbeat timeout. Reconnecting...");
+                    await RetryReconnectAsync();
+                    return;
                 }
+
+                await Task.Delay(TimeSpan.FromSeconds(PingIntervalSeconds));
             }
         }
 
-        private async Task ListenLoop()
+        private async Task ListenLoopAsync()
         {
             var buffer = new byte[4096];
-            
-            while (_webSocket.State == WebSocketState.Open)
+
+            while (!_cts.Token.IsCancellationRequested &&
+                   _webSocket.State == WebSocketState.Open)
             {
                 try
                 {
-                    var result = await _webSocket.ReceiveAsync(buffer, CancellationToken.None);
-                    var json = Encoding.UTF8.GetString(buffer, 0, result.Count);
-                    var message = JsonConvert.DeserializeObject<WebSocketMessage>(json);
-                    Debug.Log($"Received: {json}");
-
-                    if(message.Type == WebSocketMessageTypes.Pong)
+                    var result = await _webSocket.ReceiveAsync(buffer, _cts.Token);
+                    if (result.MessageType == WebSocketMessageType.Close)
                     {
-                        Debug.Log("Pong");
-                        _pongReceived = true;
+                        await RetryReconnectAsync();
+                        return;
                     }
+
+                    var json = Encoding.UTF8.GetString(buffer, 0, result.Count);
+                    var msg = JsonConvert.DeserializeObject<WebSocketMessage>(json);
+
+                    if (msg.Type == WebSocketMessageTypes.Pong)
+                    {
+                        _pongReceived = true;
+                        continue;
+                    }
+
+                    OnMessage?.Invoke(msg);
                 }
-                catch (Exception e)
+                catch (Exception ex)
                 {
-                    Debug.LogError($"Error in receiving data in websocket => {e.Message}");
+                    Debug.LogError($"Listen error: {ex.Message}");
+                    await RetryReconnectAsync();
+                    return;
                 }
             }
         }
 
-        public async Task SendMessage(WebSocketMessage message)
+        private async Task RetryReconnectAsync()
         {
-            var json= JsonConvert.SerializeObject(message);
-            var bytes = Encoding.UTF8.GetBytes(json);
+            if (_cts.IsCancellationRequested) return;
+            _cts.Cancel();
             
-            Debug.Log($"Sending web socket message => {json}");
-            await _webSocket.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, CancellationToken.None);
-            Debug.Log($"Sent web socket message {json}");
+            if (_webSocket is {State: WebSocketState.Open or  WebSocketState.CloseReceived})
+            {
+                try
+                {
+                    await _webSocket.CloseAsync(WebSocketCloseStatus.NormalClosure,
+                        "Reconnecting",
+                        CancellationToken.None);
+                }
+                catch { /* ignore */ }
+            }
+
+            _webSocket?.Dispose();
+            
+            OnDisconnected?.Invoke();
+
+            await Task.Delay(3000);
+
+            Debug.Log("Reconnecting...");
+            await ConnectWebSocketAsync();
         }
-        
+
+        public async Task SendMessage(WebSocketMessage msg)
+        {
+            var json = JsonConvert.SerializeObject(msg);
+            var bytes = Encoding.UTF8.GetBytes(json);
+            await _webSocket.SendAsync(new ArraySegment<byte>(bytes),
+                WebSocketMessageType.Text, true, CancellationToken.None);
+        }
+
         private static Guid GetDeviceGuid()
         {
             // Get Unity's built-in device identifier
@@ -156,34 +205,35 @@ namespace RPSClient
                 return new Guid(hashBytes);
             }
         }
-        
-        [Serializable]
-        public class AuthRequestDto
-        {
-            public Guid DeviceGUID { get; set; }
-        }
-        
-        public class WebSocketMessage
-        {
-            public WebSocketMessageTypes Type;
-            public string Data;
-        }
-        
-        public enum WebSocketMessageTypes
-        {
-            Ping = 1,
-            Pong = 2,
-            GetInitData = 3,
-            GetUserProfile = 4,
-            RequestMatch = 100,
-            CancelMatch = 101,
-            MatchFound = 102,
-            LeaveMatch = 103,
-            StartMatch = 104,
-            EndMatch = 105,
-            StartRound = 106,
-            RoundResult = 107,
-            Move = 108
-        }
+    }
+
+
+    [Serializable]
+    public class AuthRequestDto
+    {
+        public Guid DeviceGUID { get; set; }
+    }
+
+    public class WebSocketMessage
+    {
+        public WebSocketMessageTypes Type;
+        public string Data;
+    }
+
+    public enum WebSocketMessageTypes
+    {
+        Ping = 1,
+        Pong = 2,
+        GetInitData = 3,
+        GetUserProfile = 4,
+        RequestMatch = 100,
+        CancelMatch = 101,
+        MatchFound = 102,
+        LeaveMatch = 103,
+        StartMatch = 104,
+        EndMatch = 105,
+        StartRound = 106,
+        RoundResult = 107,
+        Move = 108
     }
 }
