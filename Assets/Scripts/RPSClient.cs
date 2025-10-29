@@ -164,6 +164,7 @@ namespace RPSClient
                     }
 
                     OnMessage?.Invoke(msg);
+                    Debug.Log($"Message received => {msg.Type} : {msg.Data}");
                 }
                 catch (Exception ex)
                 {
