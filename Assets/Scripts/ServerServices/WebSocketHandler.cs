@@ -9,15 +9,15 @@ using Newtonsoft.Json;
 using UnityEngine;
 using UnityEngine.Networking;
 
-namespace RPSClient
+namespace ServerServices
 {
-    public class RPSClient
+    public class WebSocketHandler
     {
-        private static RPSClient _instance;
+        private static WebSocketHandler _instance;
 
-        public static RPSClient Instance
+        public static WebSocketHandler Instance
         {
-            get => _instance ??= new RPSClient();
+            get => _instance ??= new WebSocketHandler();
         }
 
         private const string BASE_URL = "http://localhost:5012/";
@@ -35,9 +35,11 @@ namespace RPSClient
 
         public event Action OnConnected;
         public event Action OnDisconnected;
-        public event Action<WebSocketMessage> OnMessage;
+        public event Action<WebSocketMessage> OnSignalReceived;
+        
+        private WebSocketRequestManager _webSocketRequestManager;
 
-        private RPSClient()
+        private WebSocketHandler()
         {
         }
 
@@ -96,7 +98,8 @@ namespace RPSClient
                 Uri uri = new Uri($"{BASE_SOCKET_URL}ws?token={_token}");
                 await _webSocket.ConnectAsync(uri, _cts.Token);
                 Debug.Log("Connected to server.");
-
+                
+                _webSocketRequestManager = new WebSocketRequestManager(_webSocket);
                 OnConnected?.Invoke();
 
                 _ = Task.Run(PingLoopAsync, _cts.Token);
@@ -105,7 +108,7 @@ namespace RPSClient
             catch (Exception ex)
             {
                 Debug.LogError($"WS connect failed: {ex.Message}");
-                await RetryReconnectAsync();
+                await ReconnectAsync();
             }
         }
 
@@ -115,7 +118,7 @@ namespace RPSClient
                    _webSocket.State == WebSocketState.Open)
             {
                 _pongTcs = new TaskCompletionSource<bool>();
-                await SendMessage(new WebSocketMessage { Type = WebSocketMessageTypes.Ping });
+                await SendMessageAsync(new WebSocketMessage { Type = WebSocketMessageType.Ping });
                 Debug.Log("Ping");
 
                 var pongReceived = await Task.WhenAny(_pongTcs.Task
@@ -124,7 +127,7 @@ namespace RPSClient
                 if (!pongReceived)
                 {
                     Debug.LogError("Heartbeat timeout. Reconnecting...");
-                    await RetryReconnectAsync();
+                    await ReconnectAsync();
                     return;
                 }
 
@@ -147,35 +150,42 @@ namespace RPSClient
                 try
                 {
                     var result = await _webSocket.ReceiveAsync(buffer, _cts.Token);
-                    if (result.MessageType == WebSocketMessageType.Close)
+                    if (result.MessageType == System.Net.WebSockets.WebSocketMessageType.Close)
                     {
-                        await RetryReconnectAsync();
+                        await ReconnectAsync();
                         return;
                     }
 
                     var json = Encoding.UTF8.GetString(buffer, 0, result.Count);
                     var msg = JsonConvert.DeserializeObject<WebSocketMessage>(json);
 
-                    if (msg.Type == WebSocketMessageTypes.Pong)
+                    if (msg.Type == WebSocketMessageType.Pong)
                     {
                         OnPongReceived();
                         Debug.Log("Pong");
                         continue;
                     }
 
-                    OnMessage?.Invoke(msg);
-                    Debug.Log($"Message received => {msg.Type} : {msg.Data}");
+                    Debug.Log($"Message received => ID => {msg.RequestID} : Type => {msg.Type} : Data => {msg.Data}");
+
+                    if (!string.IsNullOrEmpty(msg.RequestID))
+                    {
+                        _webSocketRequestManager.ProcessMessageForRespond(msg);
+                        return;
+                    }
+                    
+                    OnSignalReceived?.Invoke(msg);
                 }
                 catch (Exception ex)
                 {
                     Debug.LogError($"Listen error: {ex.Message}");
-                    await RetryReconnectAsync();
+                    await ReconnectAsync();
                     return;
                 }
             }
         }
 
-        private async Task RetryReconnectAsync()
+        private async Task ReconnectAsync()
         {
             if (_cts.IsCancellationRequested) return;
             _cts.Cancel();
@@ -192,7 +202,6 @@ namespace RPSClient
             }
 
             _webSocket?.Dispose();
-            
             OnDisconnected?.Invoke();
 
             await Task.Delay(3000);
@@ -202,12 +211,24 @@ namespace RPSClient
             await ConnectWebSocketAsync();
         }
 
-        public async Task SendMessage(WebSocketMessage msg)
+        public async Task SendMessageAsync(WebSocketMessage msg)
         {
             var json = JsonConvert.SerializeObject(msg);
             var bytes = Encoding.UTF8.GetBytes(json);
             await _webSocket.SendAsync(new ArraySegment<byte>(bytes),
-                WebSocketMessageType.Text, true, CancellationToken.None);
+                System.Net.WebSockets.WebSocketMessageType.Text, true, CancellationToken.None);
+        }
+
+        public async Task<ServerResponse> SendMessageWithResponseAsync(WebSocketMessage msg, float timeout = 0)
+        {
+            var response =  await _webSocketRequestManager.RequestAsync(msg, timeout);
+
+            if (!response.Success)
+            {
+                Debug.LogError($"Error in request with type => {msg.Type} : Error => {response.Error}");
+            }
+            
+            return response;
         }
 
         private static Guid GetDeviceGuid()
@@ -241,11 +262,19 @@ namespace RPSClient
 
     public class WebSocketMessage
     {
-        public WebSocketMessageTypes Type;
-        public string Data;
+        public string RequestID { get; set; }
+        public WebSocketMessageType Type  { get; set; }
+        public string Data  { get; set; }
+        
+        public string Error  { get; set; }
+
+        public void SetRequestId()
+        {
+            RequestID = Guid.NewGuid().ToString();
+        }
     }
 
-    public enum WebSocketMessageTypes
+    public enum WebSocketMessageType
     {
         Ping = 1,
         Pong = 2,
