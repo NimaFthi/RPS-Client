@@ -67,16 +67,21 @@ namespace ServerServices
 
         #region Services
 
-        public async Task<UserProfile> GetUserProfile()
+        private async Task<T> RequestFromServer<T>(WebSocketMessageType messageType, object requestData) where T : BaseDto
         {
+            var data = requestData == null ? null : JsonConvert.SerializeObject(requestData);
+            
             var response = await _webSocketHandler.SendMessageWithResponseAsync(new WebSocketMessage
             {
-                Type = WebSocketMessageType.GetUserProfile,
-                Data = null,
+                Type = messageType,
+                Data = data
             });
 
-            return ExtractDataFromResponse<UserProfile>(response);
+            return ExtractDataFromResponse<T>(response);
         }
+
+        public async Task<UserProfile> GetUserProfile() => await RequestFromServer<UserProfile>(WebSocketMessageType.GetUserProfile, null);
+        public async Task<InitData> GetInitData() => await RequestFromServer<InitData>(WebSocketMessageType.GetInitData, null);
 
         #endregion
     }
