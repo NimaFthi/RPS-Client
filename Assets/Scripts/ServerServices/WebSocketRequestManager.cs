@@ -19,7 +19,7 @@ namespace ServerServices
             _socket = socket;
         }
 
-        public async Task<ServerResponse> RequestAsync(WebSocketMessage webSocketMessage, float timeout)
+        public async Task<ServerResponse> RequestAsync(WebSocketMessage webSocketMessage, bool hasTimeOut ,float timeoutInSeconds)
         {
             webSocketMessage.SetRequestId();
             TaskCompletionSource<ServerResponse> tcs = new();
@@ -30,7 +30,28 @@ namespace ServerServices
             await _socket.SendAsync(new ArraySegment<byte>(bytes),
                 System.Net.WebSockets.WebSocketMessageType.Text, true, CancellationToken.None);
             
-            return await tcs.Task;
+            Debug.Log($"Sending request to server => ID : {webSocketMessage.RequestID} || Type : {webSocketMessage.Type} || Data : {json}");
+
+            if (!hasTimeOut)
+            {
+                return await tcs.Task;
+            }
+            
+            var receivedRespondFromServer = await Task.WhenAny(tcs.Task, Task.Delay(TimeSpan.FromSeconds(timeoutInSeconds))) == tcs.Task;
+
+            if (receivedRespondFromServer)
+            {
+                return tcs.Task.Result;
+            }
+            else
+            {
+                _waitingForResponseRequests.Remove(webSocketMessage.RequestID);
+                return new ServerResponse
+                {
+                    Data = null,
+                    Error = "[Request Time out]"
+                };
+            }
         } 
         
         public void ProcessMessageForRespond(WebSocketMessage webSocketMessage)

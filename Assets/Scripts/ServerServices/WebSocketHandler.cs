@@ -219,9 +219,9 @@ namespace ServerServices
                 System.Net.WebSockets.WebSocketMessageType.Text, true, CancellationToken.None);
         }
 
-        public async Task<ServerResponse> SendMessageWithResponseAsync(WebSocketMessage msg, float timeout = 0)
+        public async Task<ServerResponse> SendMessageWithResponseAsync(WebSocketMessage msg, bool hasTimeOut = true ,float timeoutInSeconds = 10f)
         {
-            var response =  await _webSocketRequestManager.RequestAsync(msg, timeout);
+            var response =  await _webSocketRequestManager.RequestAsync(msg, hasTimeOut ,timeoutInSeconds);
 
             if (!response.Success)
             {
