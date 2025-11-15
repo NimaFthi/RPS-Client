@@ -171,7 +171,7 @@ namespace ServerServices
                     if (!string.IsNullOrEmpty(msg.RequestID))
                     {
                         _webSocketRequestManager.ProcessMessageForRespond(msg);
-                        return;
+                        continue;
                     }
                     
                     OnSignalReceived?.Invoke(msg);

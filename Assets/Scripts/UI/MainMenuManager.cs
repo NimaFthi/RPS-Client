@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using DTOs;
+using TMPro;
 using UnityEngine;
 
 namespace UI
@@ -22,11 +23,18 @@ namespace UI
             }
         }
         
+        [Header("References"), Space]
+        [SerializeField] private TextMeshProUGUI _statusTMP;
+        
         [Header("Enter match UI"), Space]
         [SerializeField] private EnterMatchButton _enterMatchButton;
         [SerializeField] private Transform _matchContainer;
         private Dictionary<int ,EnterMatchButton> _enterMatchButtons = new();
 
+        public void SetStatusText(string text)
+        {
+            _statusTMP.text = text;
+        }
 
         public void SetupMatchUI(List<MatchData> matchData)
         {
