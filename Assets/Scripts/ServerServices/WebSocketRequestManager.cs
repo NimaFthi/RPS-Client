@@ -34,18 +34,19 @@ namespace ServerServices
 
             if (!hasTimeOut)
             {
+                _waitingForResponseRequests.Remove(webSocketMessage.RequestID);
                 return await tcs.Task;
             }
             
             var receivedRespondFromServer = await Task.WhenAny(tcs.Task, Task.Delay(TimeSpan.FromSeconds(timeoutInSeconds))) == tcs.Task;
 
+            _waitingForResponseRequests.Remove(webSocketMessage.RequestID);
             if (receivedRespondFromServer)
             {
                 return tcs.Task.Result;
             }
             else
             {
-                _waitingForResponseRequests.Remove(webSocketMessage.RequestID);
                 return new ServerResponse
                 {
                     Data = null,
